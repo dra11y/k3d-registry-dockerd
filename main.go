@@ -365,41 +365,39 @@ func checkManifestAndReferencedBlobsExist(imageName, shasum string) (bool, error
 var imageMutexPool KeyedMutexPool
 
 // checks if we have either the index for a tag, or the blob for a digest
+// returns: (valid, statusCode) where:
 //
-// if cache file does not exist or is corrupt, returns false
-// otherwise (if cache exists):
-//   - if a digest, returns true
-//   - if a tag, returns whether the docker image ID matches the config digest in the index file
-func isCacheValid(ctx context.Context, imageName string, imageTagOrDigest string) bool {
+//	valid:	if cache file does not exist or is corrupt: false
+//			otherwise (if cache exists):
+//	  		  - if a digest: true
+//	  		  - if a tag: true if docker image ID matches the config digest in the index file,
+//			  	otherwise false
+//
+// statusCode: http status to return for HEAD request
+func isCacheValid(ctx context.Context, imageName string, imageTagOrDigest string) (bool, int) {
 	start := time.Now()
-
 	isDigest := strings.HasPrefix(imageTagOrDigest, "sha256:")
 	cachePath := cachedIndexFilename(imageName, imageTagOrDigest)
 	exists, err := fileExists(cachePath)
 	if err != nil {
-		log.Printf("CACHE MISS: %q fileExists error: %v (%v)", cachePath, err, time.Since(start))
-		return false
+		log.Printf("CACHE MISS [ERROR]: %q fileExists error: %v (%v)", cachePath, err, time.Since(start))
+		return false, http.StatusInternalServerError
 	}
 
 	if !exists {
 		log.Printf("CACHE MISS: %q does not exist (%v)", cachePath, time.Since(start))
-		return false
+		return false, http.StatusOK
 	}
 
 	if isDigest {
 		log.Printf("CACHE HIT: %q digest exists (%v)", cachePath, time.Since(start))
-		return true
+		return true, http.StatusOK
 	}
 
 	index, err := ParseIndexFile(cachePath)
-	if err != nil {
-		log.Printf("CACHE MISS: %q index corrupt or missing: %v (%v)", cachePath, err, time.Since(start))
-		return false
-	}
-
-	if len(index.Manifests) == 0 {
-		log.Printf("CACHE MISS: %q no manifests in index (%v)", cachePath, time.Since(start))
-		return false
+	if err != nil || len(index.Manifests) == 0 {
+		log.Printf("CACHE MISS: %q index corrupt: %v (%v)", cachePath, err, time.Since(start))
+		return false, http.StatusOK
 	}
 
 	manifest := index.Manifests[0]
@@ -408,28 +406,37 @@ func isCacheValid(ctx context.Context, imageName string, imageTagOrDigest string
 	currentImage, err := DockerImageInspect(ctx, fullName)
 
 	if err != nil {
-		log.Printf("CACHE MISS: %q error getting docker image %q error: %v (%v)", cachePath, fullName, err, time.Since(start))
-		return false
+		log.Printf("CACHE MISS [ERROR]: %q error getting docker image %q error: %v (%v)", cachePath, fullName, err, time.Since(start))
+		return false, http.StatusInternalServerError
 	}
 
 	if currentImage == nil {
 		log.Printf("CACHE MISS: %q docker image %q does not exist (%v)", cachePath, fullName, time.Since(start))
-		return false
+		return false, http.StatusNotFound
 	}
 
 	digest := manifest.Digest.String()
 	if currentImage.ID == digest {
 		log.Printf("CACHE HIT: %q docker ID matches cache ID (%v)", cachePath, time.Since(start))
-		return true
+		return true, http.StatusOK
 	}
 
 	log.Printf("CACHE MISS: %q docker ID does not match cache ID (%v)", cachePath, time.Since(start))
-	return false
+	return false, http.StatusOK
+}
+
+func imageCacheStatusForHead(ctx context.Context, imageName, imageTagOrDigest string) (int, error) {
+	found, err := imageMutexPool.Do(imageName, func() (any, error) {
+		_, status := isCacheValid(ctx, imageName, imageTagOrDigest)
+		return status, nil
+	})
+	return found.(int), err
 }
 
 func ensureImageInCache(ctx context.Context, imageName, imageTagOrDigest string) (bool, error) {
 	found, err := imageMutexPool.Do(imageName, func() (any, error) {
-		if isCacheValid(ctx, imageName, imageTagOrDigest) {
+		valid, _ := isCacheValid(ctx, imageName, imageTagOrDigest)
+		if valid {
 			return true, nil
 		}
 
@@ -573,12 +580,6 @@ func handleManifestUpload(w http.ResponseWriter, req *http.Request) {
 }
 
 func handleManifests(w http.ResponseWriter, req *http.Request) {
-	// handle HEAD requests to avoid duplicate calls to export
-	if req.Method == "HEAD" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
 	// handle uploads
 	if req.Method == "PUT" {
 		handleManifestUpload(w, req)
@@ -595,6 +596,22 @@ func handleManifests(w http.ResponseWriter, req *http.Request) {
 
 	// export image if we haven't yet, but only for GET (not HEAD) requests
 	if domain != "" {
+		// handle HEAD requests to avoid duplicate calls to export
+		if req.Method == "HEAD" {
+			status, _ := imageCacheStatusForHead(req.Context(), name, tagOrDigest)
+			switch status {
+			case http.StatusOK:
+				w.WriteHeader(status)
+			case http.StatusNotFound:
+				http.NotFound(w, req)
+			case http.StatusInternalServerError:
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			default:
+				w.WriteHeader(status)
+			}
+			return
+		}
+
 		found, err := ensureImageInCache(req.Context(), name, tagOrDigest)
 		if err != nil {
 			http.Error(w, fmt.Sprint(err), http.StatusInternalServerError)
