@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func handleHelloWorld(w http.ResponseWriter, req *http.Request) {
@@ -370,32 +371,34 @@ var imageMutexPool KeyedMutexPool
 //   - if a digest, returns true
 //   - if a tag, returns whether the docker image ID matches the config digest in the index file
 func isCacheValid(ctx context.Context, imageName string, imageTagOrDigest string) bool {
+	start := time.Now()
+
 	isDigest := strings.HasPrefix(imageTagOrDigest, "sha256:")
 	cachePath := cachedIndexFilename(imageName, imageTagOrDigest)
 	exists, err := fileExists(cachePath)
 	if err != nil {
-		log.Printf("CACHE MISS: error checking if exists: %q %v", cachePath, err)
+		log.Printf("CACHE MISS: error checking if exists: %q %v (%v)", cachePath, err, time.Since(start))
 		return false
 	}
 
 	if !exists {
-		log.Printf("CACHE MISS: does not exist: %q", cachePath)
+		log.Printf("CACHE MISS: does not exist: %q (%v)", cachePath, time.Since(start))
 		return false
 	}
 
 	if isDigest {
-		log.Printf("CACHE HIT: digest exists: %q", cachePath)
+		log.Printf("CACHE HIT: digest exists: %q (%v)", cachePath, time.Since(start))
 		return true
 	}
 
 	index, err := ParseIndexFile(cachePath)
 	if err != nil {
-		log.Printf("CACHE MISS: index corrupt or missing for: %q %v", cachePath, err)
+		log.Printf("CACHE MISS: index corrupt or missing for: %q %v (%v)", cachePath, err, time.Since(start))
 		return false
 	}
 
 	if len(index.Manifests) == 0 {
-		log.Printf("CACHE MISS: no manifests in index for: %q", cachePath)
+		log.Printf("CACHE MISS: no manifests in index for: %q (%v)", cachePath, time.Since(start))
 		return false
 	}
 
@@ -405,22 +408,22 @@ func isCacheValid(ctx context.Context, imageName string, imageTagOrDigest string
 	currentImage, err := DockerImageInspect(ctx, fullName)
 
 	if err != nil {
-		log.Printf("CACHE MISS: error getting docker image: %q for: %q %v", cachePath, fullName, err)
+		log.Printf("CACHE MISS: error getting docker image: %q for: %q %v (%v)", cachePath, fullName, err, time.Since(start))
 		return false
 	}
 
 	if currentImage == nil {
-		log.Printf("CACHE MISS: docker image: %q does not exist for: %q", cachePath, fullName)
+		log.Printf("CACHE MISS: docker image: %q does not exist for: %q (%v)", cachePath, fullName, time.Since(start))
 		return false
 	}
 
 	digest := manifest.Digest.String()
 	if currentImage.ID == digest {
-		log.Printf("CACHE HIT: image ID matches manifest digest: %q %q", cachePath, digest)
+		log.Printf("CACHE HIT: image ID matches manifest digest: %q %q (%v)", cachePath, digest, time.Since(start))
 		return true
 	}
 
-	log.Printf("CACHE MISS: image ID mismatch: %q cached ID: %q new ID: %q", cachePath, digest, currentImage.ID)
+	log.Printf("CACHE MISS: image ID mismatch: %q cached ID: %q new ID: %q (%v)", cachePath, digest, currentImage.ID, time.Since(start))
 	return false
 }
 
@@ -430,7 +433,17 @@ func ensureImageInCache(ctx context.Context, imageName, imageTagOrDigest string)
 			return true, nil
 		}
 
-		return findAndExportImage(ctx, imageName, imageTagOrDigest)
+		start := time.Now()
+		result, err := findAndExportImage(ctx, imageName, imageTagOrDigest)
+		elapsed := time.Since(start)
+
+		var errorPart string
+		if err != nil {
+			errorPart = fmt.Sprintf(" - error: %v", err)
+		}
+		log.Printf("findAndExportImage(%q): %t (%v)%s", imageName, result, elapsed, errorPart)
+
+		return result, err
 	})
 	return found.(bool), err
 }
@@ -574,8 +587,14 @@ func handleManifests(w http.ResponseWriter, req *http.Request) {
 		name = fmt.Sprint(domain, "/", name)
 	}
 
-	// export image if we haven't yet
+	// export image if we haven't yet, but only for GET (not HEAD) requests
 	if domain != "" {
+		if req.Method == "HEAD" {
+			log.Printf("HEAD %s", req.URL.String())
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		found, err := ensureImageInCache(req.Context(), name, tagOrDigest)
 		if err != nil {
 			http.Error(w, fmt.Sprint(err), http.StatusInternalServerError)
