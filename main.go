@@ -377,28 +377,28 @@ func isCacheValid(ctx context.Context, imageName string, imageTagOrDigest string
 	cachePath := cachedIndexFilename(imageName, imageTagOrDigest)
 	exists, err := fileExists(cachePath)
 	if err != nil {
-		log.Printf("CACHE MISS: error checking if exists: %q %v (%v)", cachePath, err, time.Since(start))
+		log.Printf("CACHE MISS: %q fileExists error: %v (%v)", cachePath, err, time.Since(start))
 		return false
 	}
 
 	if !exists {
-		log.Printf("CACHE MISS: does not exist: %q (%v)", cachePath, time.Since(start))
+		log.Printf("CACHE MISS: %q does not exist (%v)", cachePath, time.Since(start))
 		return false
 	}
 
 	if isDigest {
-		log.Printf("CACHE HIT: digest exists: %q (%v)", cachePath, time.Since(start))
+		log.Printf("CACHE HIT: %q digest exists (%v)", cachePath, time.Since(start))
 		return true
 	}
 
 	index, err := ParseIndexFile(cachePath)
 	if err != nil {
-		log.Printf("CACHE MISS: index corrupt or missing for: %q %v (%v)", cachePath, err, time.Since(start))
+		log.Printf("CACHE MISS: %q index corrupt or missing: %v (%v)", cachePath, err, time.Since(start))
 		return false
 	}
 
 	if len(index.Manifests) == 0 {
-		log.Printf("CACHE MISS: no manifests in index for: %q (%v)", cachePath, time.Since(start))
+		log.Printf("CACHE MISS: %q no manifests in index (%v)", cachePath, time.Since(start))
 		return false
 	}
 
@@ -408,22 +408,22 @@ func isCacheValid(ctx context.Context, imageName string, imageTagOrDigest string
 	currentImage, err := DockerImageInspect(ctx, fullName)
 
 	if err != nil {
-		log.Printf("CACHE MISS: error getting docker image: %q for: %q %v (%v)", cachePath, fullName, err, time.Since(start))
+		log.Printf("CACHE MISS: %q error getting docker image %q error: %v (%v)", cachePath, fullName, err, time.Since(start))
 		return false
 	}
 
 	if currentImage == nil {
-		log.Printf("CACHE MISS: docker image: %q does not exist for: %q (%v)", cachePath, fullName, time.Since(start))
+		log.Printf("CACHE MISS: %q docker image %q does not exist (%v)", cachePath, fullName, time.Since(start))
 		return false
 	}
 
 	digest := manifest.Digest.String()
 	if currentImage.ID == digest {
-		log.Printf("CACHE HIT: image ID matches manifest digest: %q %q (%v)", cachePath, digest, time.Since(start))
+		log.Printf("CACHE HIT: %q docker ID matches cache ID (%v)", cachePath, time.Since(start))
 		return true
 	}
 
-	log.Printf("CACHE MISS: image ID mismatch: %q cached ID: %q new ID: %q (%v)", cachePath, digest, currentImage.ID, time.Since(start))
+	log.Printf("CACHE MISS: %q docker ID does not match cache ID (%v)", cachePath, time.Since(start))
 	return false
 }
 
