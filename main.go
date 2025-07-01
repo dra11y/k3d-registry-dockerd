@@ -373,45 +373,54 @@ func isCacheValid(ctx context.Context, imageName string, imageTagOrDigest string
 	isDigest := strings.HasPrefix(imageTagOrDigest, "sha256:")
 	cachePath := cachedIndexFilename(imageName, imageTagOrDigest)
 	exists, err := fileExists(cachePath)
-	if err != nil || !exists {
+	if err != nil {
+		log.Printf("CACHE MISS: error checking if exists: %q %v", cachePath, err)
+		return false
+	}
+
+	if !exists {
+		log.Printf("CACHE MISS: does not exist: %q", cachePath)
 		return false
 	}
 
 	if isDigest {
+		log.Printf("CACHE HIT: digest exists: %q", cachePath)
 		return true
-	}
-
-	fullName := fmt.Sprintf("%s:%s", imageName, imageTagOrDigest)
-	currentImage, err := DockerImageInspect(ctx, fullName)
-	if err != nil || currentImage == nil {
-		// image corrupt or does not exist -- cache is invalid
-		return false
 	}
 
 	index, err := ParseIndexFile(cachePath)
 	if err != nil {
-		// index corrupt or missing -- cache is invalid
+		log.Printf("CACHE MISS: index corrupt or missing for: %q %v", cachePath, err)
 		return false
 	}
 
 	if len(index.Manifests) == 0 {
-		// no manifests in index -- corrupt? -- cache is invalid
+		log.Printf("CACHE MISS: no manifests in index for: %q", cachePath)
 		return false
 	}
 
 	manifest := index.Manifests[0]
-	if manifest.Annotations == nil {
-		// no annotations -- corrupt? -- cache is invalid
+
+	fullName := fmt.Sprintf("%s:%s", imageName, imageTagOrDigest)
+	currentImage, err := DockerImageInspect(ctx, fullName)
+
+	if err != nil {
+		log.Printf("CACHE MISS: error getting docker image: %q for: %q %v", cachePath, fullName, err)
 		return false
 	}
 
-	if configDigest, ok := manifest.Annotations["config.digest"];
-	// config.digest matches image ID -- cache is OK
-	ok && configDigest == currentImage.ID {
+	if currentImage == nil {
+		log.Printf("CACHE MISS: docker image: %q does not exist for: %q", cachePath, fullName)
+		return false
+	}
+
+	digest := manifest.Digest.String()
+	if currentImage.ID == digest {
+		log.Printf("CACHE HIT: image ID matches manifest digest: %q %q", cachePath, digest)
 		return true
 	}
 
-	// annotation missing -- cache is invalid
+	log.Printf("CACHE MISS: image ID mismatch: %q cached ID: %q new ID: %q", cachePath, digest, currentImage.ID)
 	return false
 }
 
