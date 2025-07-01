@@ -573,6 +573,12 @@ func handleManifestUpload(w http.ResponseWriter, req *http.Request) {
 }
 
 func handleManifests(w http.ResponseWriter, req *http.Request) {
+	// handle HEAD requests to avoid duplicate calls to export
+	if req.Method == "HEAD" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	// handle uploads
 	if req.Method == "PUT" {
 		handleManifestUpload(w, req)
@@ -589,12 +595,6 @@ func handleManifests(w http.ResponseWriter, req *http.Request) {
 
 	// export image if we haven't yet, but only for GET (not HEAD) requests
 	if domain != "" {
-		if req.Method == "HEAD" {
-			log.Printf("HEAD %s", req.URL.String())
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
 		found, err := ensureImageInCache(req.Context(), name, tagOrDigest)
 		if err != nil {
 			http.Error(w, fmt.Sprint(err), http.StatusInternalServerError)
