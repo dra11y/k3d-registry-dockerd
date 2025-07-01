@@ -363,24 +363,64 @@ func checkManifestAndReferencedBlobsExist(imageName, shasum string) (bool, error
 
 var imageMutexPool KeyedMutexPool
 
+// checks if we have either the index for a tag, or the blob for a digest
+//
+// if cache file does not exist or is corrupt, returns false
+// otherwise (if cache exists):
+//   - if a digest, returns true
+//   - if a tag, returns whether the docker image ID matches the config digest in the index file
+func isCacheValid(ctx context.Context, imageName string, imageTagOrDigest string) bool {
+	isDigest := strings.HasPrefix(imageTagOrDigest, "sha256:")
+	cachePath := cachedIndexFilename(imageName, imageTagOrDigest)
+	exists, err := fileExists(cachePath)
+	if err != nil || !exists {
+		return false
+	}
+
+	if isDigest {
+		return true
+	}
+
+	fullName := fmt.Sprintf("%s:%s", imageName, imageTagOrDigest)
+	currentImage, err := DockerImageInspect(ctx, fullName)
+	if err != nil || currentImage == nil {
+		// image corrupt or does not exist -- cache is invalid
+		return false
+	}
+
+	index, err := ParseIndexFile(cachePath)
+	if err != nil {
+		// index corrupt or missing -- cache is invalid
+		return false
+	}
+
+	if len(index.Manifests) == 0 {
+		// no manifests in index -- corrupt? -- cache is invalid
+		return false
+	}
+
+	manifest := index.Manifests[0]
+	if manifest.Annotations == nil {
+		// no annotations -- corrupt? -- cache is invalid
+		return false
+	}
+
+	if configDigest, ok := manifest.Annotations["config.digest"];
+	// config.digest matches image ID -- cache is OK
+	ok && configDigest == currentImage.ID {
+		return true
+	}
+
+	// annotation missing -- cache is invalid
+	return false
+}
+
 func ensureImageInCache(ctx context.Context, imageName, imageTagOrDigest string) (bool, error) {
 	found, err := imageMutexPool.Do(imageName, func() (any, error) {
-		// check if we have either the index for a tag, or the blob for a digest
-		var cachePath string
-		if strings.HasPrefix(imageTagOrDigest, "sha256:") {
-			cachePath = cachedBlobFilenameForSha256(imageName, strings.TrimPrefix(imageTagOrDigest, "sha256:"))
-		} else {
-			cachePath = cachedIndexFilename(imageName, imageTagOrDigest)
-		}
-		exists, err := fileExists(cachePath)
-		if err != nil {
-			return false, nil
-		}
-		if exists {
+		if isCacheValid(ctx, imageName, imageTagOrDigest) {
 			return true, nil
 		}
 
-		// otherwise, find and export the image
 		return findAndExportImage(ctx, imageName, imageTagOrDigest)
 	})
 	return found.(bool), err
